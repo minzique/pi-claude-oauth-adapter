@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import { createAssistantMessageEventStream, streamSimpleAnthropic, type Api, type AssistantMessageEvent, type Context, type Model, type SimpleStreamOptions } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { createAssistantMessageEventStream, type Api, type AssistantMessageEvent, type Context, type Model, type ProviderHeaders, type SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { streamSimple as streamSimpleAnthropic } from "@earendil-works/pi-ai/api/anthropic-messages";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const DOCS_MARKER =
   "Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):";
@@ -614,9 +615,12 @@ function usageResponseToRateLimitHeaders(value: unknown): Record<string, string>
 async function fetchQuotaCheckHeaders(
   apiKey: string,
   baseUrl: string | undefined,
-  headers: Record<string, string> | undefined,
+  headers: ProviderHeaders | undefined,
 ): Promise<{ headers: Record<string, string>; status: number } | null> {
   const usageUrl = getOAuthUsageUrl(baseUrl);
+  const nonNullHeaders = Object.fromEntries(
+    Object.entries(headers ?? {}).filter((entry): entry is [string, string] => entry[1] !== null),
+  );
   const sharedHeaders = {
     accept: "application/json",
     authorization: `Bearer ${apiKey}`,
@@ -626,7 +630,7 @@ async function fetchQuotaCheckHeaders(
     "anthropic-beta": "oauth-2025-04-20",
     "user-agent": getClaudeUserAgent(),
     "x-app": "cli",
-    ...headers,
+    ...nonNullHeaders,
   };
 
   if (usageUrl) {

@@ -2,6 +2,10 @@
 
 All notable changes to `pi-claude-oauth-adapter` live here.
 
+## 0.2.2 — 2026-08-22
+
+- Migrate Pi runtime imports and peer dependencies to the `@earendil-works/*` package scope.
+
 ## 0.2.1 — 2026-08-22
 
 - Move the package into its own standalone repository.
