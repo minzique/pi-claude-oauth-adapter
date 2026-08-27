@@ -229,7 +229,14 @@ function getClaudeUserAgent(): string {
 
 function buildBillingHeader(messages: unknown, entrypoint: string = getEntrypoint(), includeCch: boolean = isFirstPartyAnthropicBaseUrl(undefined)): string {
   const list = Array.isArray(messages) ? messages : [];
-  const firstUserMessage = list.find((message) => isObject(message) && message.role === "user") as Record<string, unknown> | undefined;
+  // Skip the injected docs block so the sampled characters come from the first
+  // real user message, matching what Claude Code itself would sample.
+  const firstUserMessage = list.find(
+    (message) =>
+      isObject(message) &&
+      message.role === "user" &&
+      !getBillingMessageText(message.content).startsWith("<pi-docs-context>"),
+  ) as Record<string, unknown> | undefined;
   const messageText = firstUserMessage ? getBillingMessageText(firstUserMessage.content) : "";
   const version = getClaudeCodeVersion();
   const sampledChars = [4, 7, 20].map((index) => messageText[index] ?? "0").join("");
@@ -964,12 +971,9 @@ function prependCustomMessage(messages: AgentMessage[], docsSection: string, tim
     timestamp,
   };
 
-  const latestUserIndex = [...messages].findLastIndex((message) => isUserMessage(message));
-  if (latestUserIndex < 0) return [...messages, customMessage as AgentMessage];
-
-  const nextMessages = [...messages];
-  nextMessages.splice(latestUserIndex, 0, customMessage as AgentMessage);
-  return nextMessages;
+  // Index 0, because it never moves. Any anchor that tracks the conversation
+  // shifts between turns, and every shift re-bills the cached prefix.
+  return [customMessage as AgentMessage, ...messages];
 }
 
 function appendCustomMessage(messages: AgentMessage[], docsSection: string, timestamp: number): AgentMessage[] {
@@ -1018,12 +1022,43 @@ function prependReminderToLatestUser(messages: AgentMessage[], docsSection: stri
   return nextMessages;
 }
 
+function userMessageText(message: UserLikeMessage): string {
+  if (typeof message.content === "string") return message.content;
+  return message.content
+    .filter((part): part is TextContentPart => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+function messageScanText(message: AgentMessage): string {
+  if (isUserMessage(message)) return userMessageText(message);
+  // Compaction and branch summaries replace the user messages they cover, so
+  // they must count too or compaction would silently un-latch the block.
+  const summary = (message as { summary?: unknown }).summary;
+  return typeof summary === "string" ? summary : "";
+}
+
+// Decide from persisted messages only, so the answer is the same after
+// `pi -c`, resume, or fork. A block that comes and goes from index 0 re-bills
+// the whole conversation. Once a message matches, every request injects.
+function shouldInjectAtHead(messages: AgentMessage[]): boolean {
+  const scope = getEnvScope();
+  if (scope === "never") return false;
+  if (scope === "always") return true;
+  return messages.some((message) => PI_TOPIC_REGEX.test(messageScanText(message)));
+}
+
 function injectDocs(messages: AgentMessage[], state: ActiveTurnState): AgentMessage[] {
-  if (!state.shouldInject || state.mode === "none") return messages;
+  if (state.mode === "none") return messages;
+
+  if (state.mode === "prepend-custom-message") {
+    if (!shouldInjectAtHead(messages)) return messages;
+    return prependCustomMessage(messages, state.docsSection, state.timestamp);
+  }
+
+  if (!state.shouldInject) return messages;
 
   switch (state.mode) {
-    case "prepend-custom-message":
-      return prependCustomMessage(messages, state.docsSection, state.timestamp);
     case "append-custom-message":
       return appendCustomMessage(messages, state.docsSection, state.timestamp);
     case "user-reminder":
@@ -1209,7 +1244,7 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
     const nextMessages = injectDocs(event.messages, activeTurn);
     log("context", {
       mode: activeTurn.mode,
-      shouldInject: activeTurn.shouldInject,
+      injected: nextMessages !== event.messages,
       messagesBefore: summarizeMessages(event.messages),
       messagesAfter: summarizeMessages(nextMessages),
     });

@@ -42,7 +42,7 @@ flowchart LR
 For Anthropic OAuth requests, the adapter:
 
 - removes Pi's docs block and any conflicting Claude Code identity block from the system prompt
-- reinjects Pi docs as hidden context when the user asks about Pi
+- reinjects Pi docs as hidden context once the conversation touches a Pi topic
 - adds or updates the Claude billing header
 - turns generic `429` responses into Claude-style limit and reset messages
 
@@ -73,6 +73,8 @@ No configuration is required for normal use.
 | `PI_CLAUDE_CODE_ENTRYPOINT` | `pi` | Billing-header entrypoint |
 | `PI_CLAUDE_CODE_WORKLOAD` | unset | Optional workload metadata |
 | `PI_CLAUDE_CODE_SUBSCRIPTION_TYPE` | unset | Plan type used for limit labels |
+
+The default mode injects the docs block at the start of the conversation, and once any user message mentions a Pi topic, every request after that includes it. Both rules exist for prompt caching. The block is added per request and never saved to the session, so if it moves or disappears between requests, the cached prefix breaks at that point and the provider re-bills everything after it, usually the whole previous turn. The other two modes anchor to the latest user message and pay that cost every turn they fire. Stick with the default unless cache cost doesn't matter to you.
 
 Example:
 

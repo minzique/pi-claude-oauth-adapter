@@ -2,6 +2,10 @@
 
 All notable changes to `pi-claude-oauth-adapter` live here.
 
+## Unreleased
+
+- `prepend-custom-message` now injects the docs block at the start of the conversation and keeps it there once any user message mentions a Pi topic. It used to sit in front of the latest user message and only appear when the current prompt matched, so the block moved between requests and the provider re-billed everything after the old position, usually the whole previous turn. The decision now reads only persisted messages (user messages plus compaction and branch summaries), so it holds across `pi -c`, resume, fork, and compaction, as long as the compacted summary still mentions Pi. The billing header now skips the injected block when sampling the first user message.
+
 ## 0.2.2 — 2026-08-22
 
 - Migrate Pi runtime imports and peer dependencies to the `@earendil-works/*` package scope.
