@@ -12,7 +12,7 @@ const IDENTITY_BLOCK = "You are Claude Code, Anthropic's official CLI for Claude
 const CUSTOM_TYPE = "claude-oauth-docs-context";
 const READY_STATUS_KEY = "claude-oauth-ready";
 const ISSUE_STATUS_KEY = "claude-oauth-issue";
-const END_MARKERS = ["\n\n# Project Context", "\n\n<available_skills>", "\nCurrent date:"] as const;
+const END_MARKERS = ["\n\n<project_context>", "\n\n<available_skills>", "\nCurrent date:", "\nCurrent working directory:"] as const;
 const PI_TOPIC_REGEX =
   /\b(pi|@mariozechner\/pi-|pi-mono|coding agent harness|pi sdk|pi extension|pi theme|pi skill|pi tui|pi package|prompt templates?|keybindings?|custom providers?|adding models?)\b/i;
 const DEFAULT_CLAUDE_CODE_VERSION = "2.1.226";
