@@ -29,6 +29,7 @@
   "scripts": {
     "build": "echo 'nothing to build'",
     "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "prepack": "npm run check"
   },
   "publishConfig": {

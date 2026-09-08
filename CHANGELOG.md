@@ -2,6 +2,13 @@
 
 All notable changes to `pi-claude-oauth-adapter` live here.
 
+## Unreleased (codesoda fork)
+
+- Update the bundled Claude Code version to `2.1.265`.
+- Override Pi's older User-Agent for OAuth model requests, keeping it aligned with quota checks and billing metadata, including environment version overrides.
+- Preserve API-key requests, unrelated headers, and caller-owned model/options objects.
+- Add mocked wire-request regression tests; live Fable 5 acceptance is not yet verified.
+
 ## 0.2.2 — 2026-08-22
 
 - Migrate Pi runtime imports and peer dependencies to the `@earendil-works/*` package scope.

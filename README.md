@@ -6,8 +6,10 @@ Use a Claude Pro or Max subscription with [Pi](https://github.com/badlogic/pi-mo
 [![license](https://img.shields.io/npm/l/pi-claude-oauth-adapter)](./LICENSE)
 
 ```bash
-pi install npm:pi-claude-oauth-adapter
+pi install git:github.com/codesoda/pi-claude-oauth-adapter
 ```
+
+This fork updates the bundled Claude Code version to **2.1.265** (the npm `latest` release when updated) and uses it consistently in OAuth model-request User-Agent headers, quota checks, and billing metadata. It does not fetch version updates at runtime. Remove your previous adapter installation with `pi remove <source>` (use the source shown by `pi list`) before installing this fork, then restart Pi. The npm badge above refers to the upstream package, not this fork.
 
 This extension adapts Pi's built-in Anthropic OAuth flow to the request format expected by Claude's subscription backend. It does not implement OAuth or bypass usage limits.
 
@@ -69,7 +71,7 @@ No configuration is required for normal use.
 | `PI_CLAUDE_OAUTH_REINJECT_MODE` | `prepend-custom-message` | `prepend-custom-message`, `append-custom-message`, `user-reminder`, or `none` |
 | `PI_CLAUDE_OAUTH_DOCS_FILE` | unset | Fallback file containing Pi docs context |
 | `PI_CLAUDE_OAUTH_LOG_FILE` | unset | JSONL debug log path |
-| `PI_CLAUDE_CODE_VERSION` | bundled version | Claude Code version in request metadata |
+| `PI_CLAUDE_CODE_VERSION` | `2.1.265` | Claude Code version in OAuth User-Agent and billing metadata; takes precedence over `CLAUDE_CODE_VERSION` |
 | `PI_CLAUDE_CODE_ENTRYPOINT` | `pi` | Billing-header entrypoint |
 | `PI_CLAUDE_CODE_WORKLOAD` | unset | Optional workload metadata |
 | `PI_CLAUDE_CODE_SUBSCRIPTION_TYPE` | unset | Plan type used for limit labels |
@@ -85,7 +87,7 @@ Debug logs may contain prompt excerpts and request metadata. Review and redact t
 ## Install from source
 
 ```bash
-git clone https://github.com/minzique/pi-claude-oauth-adapter.git
+git clone https://github.com/codesoda/pi-claude-oauth-adapter.git
 pi install ./pi-claude-oauth-adapter
 ```
 
@@ -118,6 +120,7 @@ Report bugs on [GitHub](https://github.com/minzique/pi-claude-oauth-adapter/issu
 ```bash
 npm install
 npm run check
+npm test # Node 22.6+ with TypeScript stripping
 npm pack --dry-run
 ```
 

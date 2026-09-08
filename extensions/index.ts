@@ -15,7 +15,8 @@ const ISSUE_STATUS_KEY = "claude-oauth-issue";
 const END_MARKERS = ["\n\n# Project Context", "\n\n<available_skills>", "\nCurrent date:"] as const;
 const PI_TOPIC_REGEX =
   /\b(pi|@mariozechner\/pi-|pi-mono|coding agent harness|pi sdk|pi extension|pi theme|pi skill|pi tui|pi package|prompt templates?|keybindings?|custom providers?|adding models?)\b/i;
-const DEFAULT_CLAUDE_CODE_VERSION = "2.1.226";
+// Latest @anthropic-ai/claude-code npm release when this default was updated.
+const DEFAULT_CLAUDE_CODE_VERSION = "2.1.265";
 const BILLING_SALT = "59cf53e54c78";
 const DEFAULT_ENTRYPOINT = "pi";
 const DEFAULT_BILLING_CCH = "00000";
@@ -225,6 +226,16 @@ function isFirstPartyAnthropicBaseUrl(baseUrl: string | undefined): boolean {
 
 function getClaudeUserAgent(): string {
   return `claude-cli/${getClaudeCodeVersion()} (external, ${getEntrypoint()})`;
+}
+
+function withClaudeUserAgent(headers: Record<string, string> | undefined): Record<string, string>;
+function withClaudeUserAgent(headers: ProviderHeaders | undefined): ProviderHeaders;
+function withClaudeUserAgent(headers: ProviderHeaders | undefined): ProviderHeaders {
+  // Header names are case-insensitive; remove aliases before setting the version.
+  return {
+    ...Object.fromEntries(Object.entries(headers ?? {}).filter(([name]) => name.toLowerCase() !== "user-agent")),
+    "user-agent": getClaudeUserAgent(),
+  };
 }
 
 function buildBillingHeader(messages: unknown, entrypoint: string = getEntrypoint(), includeCch: boolean = isFirstPartyAnthropicBaseUrl(undefined)): string {
@@ -1114,11 +1125,15 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
         return streamSimpleAnthropic(anthropicModel, context, options);
       }
 
+      // Pi's Anthropic provider bundles its own (potentially older) User-Agent.
+      // Keep model requests and quota checks aligned with our billing metadata.
+      const oauthModel = { ...anthropicModel, headers: withClaudeUserAgent(anthropicModel.headers) };
+      const oauthOptions = { ...options, headers: withClaudeUserAgent(options?.headers) };
       const outer = createAssistantMessageEventStream();
 
       void (async () => {
         try {
-          const preflightFooterStatus = await resolveAnthropicQuotaFooterStatus(anthropicModel, options);
+          const preflightFooterStatus = await resolveAnthropicQuotaFooterStatus(anthropicModel, oauthOptions);
           if (preflightFooterStatus?.severity === "error") {
             log("custom_stream_preflight_rejected", { message: preflightFooterStatus.message });
             applyFooterStatusToCurrentContext(preflightFooterStatus);
@@ -1131,12 +1146,12 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
             applyFooterStatusToCurrentContext(preflightFooterStatus);
           }
 
-          const inner = streamSimpleAnthropic(anthropicModel, context, options);
+          const inner = streamSimpleAnthropic(oauthModel, context, oauthOptions);
           for await (const event of inner) {
             log("custom_stream_event", { type: event.type, hasErrorMessage: event.type === "error" ? !!event.error.errorMessage : false });
             if (event.type === "error" && isAnthropicRateLimitError(event.error.errorMessage)) {
               log("custom_stream_rate_limit", { message: event.error.errorMessage });
-              const footerStatus = await resolveAnthropicQuotaFooterStatus(anthropicModel, options);
+              const footerStatus = await resolveAnthropicQuotaFooterStatus(anthropicModel, oauthOptions);
               if (footerStatus) {
                 log("custom_stream_quota_resolved", { message: footerStatus.message, severity: footerStatus.severity });
                 applyFooterStatusToCurrentContext(footerStatus);
@@ -1236,7 +1251,7 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
       normalized.billingState === "injected"
         ? "Injected Claude billing header into Anthropic OAuth request"
         : normalized.billingState === "updated"
-          ? "Updated Claude billing header to Claude Code 2.1.226 shape"
+          ? `Updated Claude billing header to Claude Code ${getClaudeCodeVersion()} shape`
           : normalized.billingState === "present"
             ? "Anthropic OAuth request already includes Claude billing header"
             : "Normalized Anthropic OAuth request";
