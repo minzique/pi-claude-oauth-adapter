@@ -2,7 +2,7 @@
 
 All notable changes to `pi-claude-oauth-adapter` live here.
 
-## 0.2.2 — unreleased
+## 0.2.2 — 2026-09-14
 
 - Stop blocking every request with `You're out of usage credits`: `extra_usage.disabled_reason` is set on any account that never enabled extra usage, so it no longer creates a usage-exhausted state on its own. Exhaustion now requires a spent or locked primary limit.
 - Import `streamSimpleAnthropic` from `@earendil-works/pi-ai/compat`. Pi's extension loader only aliases the pi-ai root, `/compat`, `/oauth`, and `/providers/all`, so the previous `/api/anthropic-messages` subpath import made the whole extension fail to load.
