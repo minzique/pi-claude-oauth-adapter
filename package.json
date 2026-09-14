@@ -28,7 +28,8 @@
   "license": "MIT",
   "scripts": {
     "build": "echo 'nothing to build'",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && vitest --run",
+    "test": "vitest --run",
     "prepack": "npm run check"
   },
   "publishConfig": {
@@ -55,7 +56,8 @@
     "@earendil-works/pi-ai": "^0.84.2",
     "@earendil-works/pi-coding-agent": "^0.84.2",
     "@types/node": "^24.0.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.11"
   },
   "pi": {
     "extensions": [

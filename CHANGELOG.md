@@ -2,8 +2,15 @@
 
 All notable changes to `pi-claude-oauth-adapter` live here.
 
-## 0.2.2 — 2026-08-22
+## 0.2.2 — 2026-09-14
 
+- Stop blocking every request with `You're out of usage credits`: `extra_usage.disabled_reason` is set on any account that never enabled extra usage, so it no longer creates a usage-exhausted state on its own. Exhaustion now requires a spent or locked primary limit.
+- Import `streamSimpleAnthropic` from `@earendil-works/pi-ai/compat`. Pi's extension loader only aliases the pi-ai root, `/compat`, `/oauth`, and `/providers/all`, so the previous `/api/anthropic-messages` subpath import made the whole extension fail to load.
+- Advertise Claude Code `2.1.270`. Anthropic rejects newer models (for example Claude Fable 5.1) when the advertised version is older than the model requires.
+- Learn the required version automatically: a `version X or newer is required` rejection is retried once with the demanded version, the result is cached in `~/.cache/pi-claude-oauth-adapter/`, and the published Claude Code release is refreshed at most every 12 hours (`PI_CLAUDE_OAUTH_VERSION_CHECK=0` to disable).
+- Send Claude Code client headers (`user-agent`, `x-app`, `x-claude-code-session-id`) on the inference path instead of only on the quota probe, so the version fallback and pi's stale `claude-cli/2.1.75` user agent agree (`PI_CLAUDE_OAUTH_CLIENT_HEADERS=0` to disable).
+- Decide `cch` from the model's own base URL instead of only `ANTHROPIC_BASE_URL`.
+- Add a vitest suite covering usage parsing, footer status, version handling, and the billing header.
 - Migrate Pi runtime imports and peer dependencies to the `@earendil-works/*` package scope.
 
 ## 0.2.1 — 2026-08-22

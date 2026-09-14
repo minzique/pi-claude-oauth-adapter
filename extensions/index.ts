@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, type Api, type AssistantMessageEvent, type Context, type Model, type ProviderHeaders, type SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { streamSimple as streamSimpleAnthropic } from "@earendil-works/pi-ai/api/anthropic-messages";
+// Pi's extension loader only aliases the pi-ai root, `/compat`, `/oauth` and
+// `/providers/all`. Deeper subpaths such as `/api/anthropic-messages` resolve against the
+// compat entry file and make the whole extension fail to load.
+import { streamSimpleAnthropic } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const DOCS_MARKER =
@@ -15,7 +19,14 @@ const ISSUE_STATUS_KEY = "claude-oauth-issue";
 const END_MARKERS = ["\n\n# Project Context", "\n\n<available_skills>", "\nCurrent date:"] as const;
 const PI_TOPIC_REGEX =
   /\b(pi|@mariozechner\/pi-|pi-mono|coding agent harness|pi sdk|pi extension|pi theme|pi skill|pi tui|pi package|prompt templates?|keybindings?|custom providers?|adding models?)\b/i;
-const DEFAULT_CLAUDE_CODE_VERSION = "2.1.226";
+const DEFAULT_CLAUDE_CODE_VERSION = "2.1.270";
+// Anthropic gates newer models on the advertised Claude Code version and answers with
+// HTTP 400 `invalid_request_error` when it is too old, e.g.
+// "Claude Code 2.1.226 does not support this model; version 2.1.251 or newer is required."
+const VERSION_TOO_OLD_PATTERN = /version\s+(\d+(?:\.\d+)+)\s+or\s+newer\s+is\s+required/i;
+const CLAUDE_CODE_REGISTRY_URL = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
+const VERSION_REFRESH_TTL_MS = 12 * 60 * 60 * 1000;
+const VERSION_REFRESH_TIMEOUT_MS = 5_000;
 const BILLING_SALT = "59cf53e54c78";
 const DEFAULT_ENTRYPOINT = "pi";
 const DEFAULT_BILLING_CCH = "00000";
@@ -92,6 +103,11 @@ interface ClaudeRateLimitState {
   isUsingOverage: boolean;
 }
 
+interface VersionState {
+  version: string | null;
+  checkedAt: number;
+}
+
 interface ClaudeFooterStatus {
   message: string;
   severity: "warning" | "error";
@@ -139,6 +155,7 @@ interface ResolvedDocsSection {
 
 let activeTurn: ActiveTurnState | null = null;
 let latestCtx: ExtensionContext | null = null;
+let versionState: VersionState | null = null;
 let cachedQuotaFooterStatus: { keyHash: string; value: ClaudeFooterStatus | null; checkedAt: number } | null = null;
 let adapterStatus: AdapterStatusState = {
   phase: "inactive",
@@ -182,8 +199,130 @@ function getEnvScope(): ReinjectionScope {
   return "pi-only";
 }
 
+export function compareVersions(left: string, right: string): number {
+  const leftParts = left.split(".").map((part) => Number.parseInt(part, 10));
+  const rightParts = right.split(".").map((part) => Number.parseInt(part, 10));
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index++) {
+    const leftPart = leftParts[index] ?? 0;
+    const rightPart = rightParts[index] ?? 0;
+    if (!Number.isFinite(leftPart) || !Number.isFinite(rightPart)) return 0;
+    if (leftPart !== rightPart) return leftPart < rightPart ? -1 : 1;
+  }
+  return 0;
+}
+
+function isVersionString(value: unknown): value is string {
+  return typeof value === "string" && /^\d+(?:\.\d+)+$/.test(value);
+}
+
+function getVersionStateFile(): string {
+  const cacheHome = process.env.XDG_CACHE_HOME?.trim() || join(homedir(), ".cache");
+  return join(cacheHome, "pi-claude-oauth-adapter", "claude-code-version.json");
+}
+
+function loadVersionState(): VersionState {
+  if (versionState) return versionState;
+
+  let loaded: VersionState = { version: null, checkedAt: 0 };
+  try {
+    const raw: unknown = JSON.parse(readFileSync(getVersionStateFile(), "utf8"));
+    if (isObject(raw)) {
+      loaded = {
+        version: isVersionString(raw.version) ? raw.version : null,
+        checkedAt: typeof raw.checkedAt === "number" ? raw.checkedAt : 0,
+      };
+    }
+  } catch {
+    // A missing or unreadable cache just means we fall back to the bundled default.
+  }
+
+  versionState = loaded;
+  return loaded;
+}
+
+function saveVersionState(next: VersionState): void {
+  versionState = next;
+  try {
+    const path = getVersionStateFile();
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `${JSON.stringify(next)}\n`, "utf8");
+  } catch {
+    // Version learning is an optimization; never fail a session over the cache file.
+  }
+}
+
+function getClaudeCodeVersionOverride(): string | undefined {
+  const override = process.env.PI_CLAUDE_CODE_VERSION ?? process.env.CLAUDE_CODE_VERSION;
+  return override?.trim() ? override.trim() : undefined;
+}
+
 function getClaudeCodeVersion(): string {
-  return process.env.PI_CLAUDE_CODE_VERSION ?? process.env.CLAUDE_CODE_VERSION ?? DEFAULT_CLAUDE_CODE_VERSION;
+  const override = getClaudeCodeVersionOverride();
+  if (override) return override;
+
+  const learned = loadVersionState().version;
+  return learned && compareVersions(learned, DEFAULT_CLAUDE_CODE_VERSION) > 0 ? learned : DEFAULT_CLAUDE_CODE_VERSION;
+}
+
+/**
+ * Adopt a newer Claude Code version, e.g. one demanded by Anthropic's model gate or
+ * published upstream. Returns true when the effective version actually changed.
+ */
+function recordClaudeCodeVersion(version: string, source: string): boolean {
+  if (!isVersionString(version)) return false;
+
+  const current = getClaudeCodeVersion();
+  const state = loadVersionState();
+  const isNewer = compareVersions(version, current) > 0;
+  saveVersionState({ version: isNewer ? version : state.version, checkedAt: Date.now() });
+  if (!isNewer) return false;
+
+  log("claude_code_version_learned", { version, source, previous: current, pinned: !!getClaudeCodeVersionOverride() });
+  return !getClaudeCodeVersionOverride();
+}
+
+export function extractRequiredClaudeCodeVersion(message: string | undefined): string | undefined {
+  if (!message) return undefined;
+  const match = VERSION_TOO_OLD_PATTERN.exec(message);
+  return match && isVersionString(match[1]) ? match[1] : undefined;
+}
+
+function isVersionCheckEnabled(): boolean {
+  const value = process.env.PI_CLAUDE_OAUTH_VERSION_CHECK;
+  if (value === "0" || value === "false") return false;
+  return !process.env.PI_OFFLINE && !getClaudeCodeVersionOverride();
+}
+
+/**
+ * Keep the advertised version in step with the published Claude Code release so newly
+ * gated models keep working without waiting for an adapter release.
+ */
+async function refreshClaudeCodeVersion(): Promise<void> {
+  if (!isVersionCheckEnabled()) return;
+  if (Date.now() - loadVersionState().checkedAt < VERSION_REFRESH_TTL_MS) return;
+
+  try {
+    const response = await fetch(CLAUDE_CODE_REGISTRY_URL, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(VERSION_REFRESH_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      saveVersionState({ ...loadVersionState(), checkedAt: Date.now() });
+      return;
+    }
+
+    const body: unknown = await response.json();
+    const published = isObject(body) ? body.version : undefined;
+    if (isVersionString(published)) {
+      recordClaudeCodeVersion(published, "registry");
+      return;
+    }
+    saveVersionState({ ...loadVersionState(), checkedAt: Date.now() });
+  } catch (error) {
+    saveVersionState({ ...loadVersionState(), checkedAt: Date.now() });
+    log("claude_code_version_check_failed", { message: error instanceof Error ? error.message : String(error) });
+  }
 }
 
 function getEntrypoint(): string {
@@ -227,7 +366,29 @@ function getClaudeUserAgent(): string {
   return `claude-cli/${getClaudeCodeVersion()} (external, ${getEntrypoint()})`;
 }
 
-function buildBillingHeader(messages: unknown, entrypoint: string = getEntrypoint(), includeCch: boolean = isFirstPartyAnthropicBaseUrl(undefined)): string {
+function areClientHeadersEnabled(): boolean {
+  const value = process.env.PI_CLAUDE_OAUTH_CLIENT_HEADERS;
+  return value !== "0" && value !== "false";
+}
+
+/**
+ * Pi's built-in Anthropic client advertises its own (stale) `claude-cli/<version>` user
+ * agent. Anthropic reads the version from the billing system block first and falls back to
+ * the user agent, so both have to carry the version this adapter advertises.
+ */
+function withClaudeCodeHeaders(options: SimpleStreamOptions | undefined): SimpleStreamOptions | undefined {
+  if (!options || !areClientHeadersEnabled()) return options;
+
+  const claudeCodeHeaders: ProviderHeaders = {
+    "user-agent": getClaudeUserAgent(),
+    "x-app": "cli",
+    ...(options.sessionId ? { "x-claude-code-session-id": options.sessionId } : {}),
+  };
+
+  return { ...options, headers: { ...claudeCodeHeaders, ...options.headers } };
+}
+
+export function buildBillingHeader(messages: unknown, entrypoint: string = getEntrypoint(), includeCch: boolean = isFirstPartyAnthropicBaseUrl(undefined)): string {
   const list = Array.isArray(messages) ? messages : [];
   const firstUserMessage = list.find((message) => isObject(message) && message.role === "user") as Record<string, unknown> | undefined;
   const messageText = firstUserMessage ? getBillingMessageText(firstUserMessage.content) : "";
@@ -513,7 +674,7 @@ function formatWarningRateLimitMessage(state: ClaudeRateLimitState): string | nu
   return `Approaching ${label}`;
 }
 
-function getClaudeFooterStatus(headers: Record<string, string>, httpStatus?: number): ClaudeFooterStatus | null {
+export function getClaudeFooterStatus(headers: Record<string, string>, httpStatus?: number): ClaudeFooterStatus | null {
   const state = parseClaudeRateLimitState(headers, httpStatus);
   if (!state) return null;
 
@@ -574,38 +735,48 @@ function parseUsageReset(value: unknown): number | undefined {
   return Number.isFinite(timestamp) ? Math.round(timestamp / 1000) : undefined;
 }
 
-function getUsageLimit(value: unknown): { utilization: number; resetsAt?: number } | null {
+function getUsageLimit(value: unknown): { utilization: number; resetsAt?: number; locked: boolean } | null {
   if (!isObject(value) || typeof value.utilization !== "number" || !Number.isFinite(value.utilization)) return null;
-  return { utilization: value.utilization / 100, resetsAt: parseUsageReset(value.resets_at) };
+  return {
+    utilization: value.utilization / 100,
+    resetsAt: parseUsageReset(value.resets_at),
+    locked: typeof value.locked_reason === "string" && value.locked_reason.length > 0,
+  };
 }
 
-function usageResponseToRateLimitHeaders(value: unknown): Record<string, string> | null {
+type UsageLimitCandidate = { type: ClaudeRateLimitType; value: { utilization: number; resetsAt?: number; locked: boolean } };
+
+export function usageResponseToRateLimitHeaders(value: unknown): Record<string, string> | null {
   if (!isObject(value)) return null;
-  const candidates: Array<{ type: ClaudeRateLimitType; value: { utilization: number; resetsAt?: number } | null }> = [
+  const candidates: Array<{ type: ClaudeRateLimitType; value: { utilization: number; resetsAt?: number; locked: boolean } | null }> = [
     { type: "five_hour", value: getUsageLimit(value.five_hour) },
     { type: "seven_day", value: getUsageLimit(value.seven_day) },
     { type: "seven_day_opus", value: getUsageLimit(value.seven_day_opus) },
     { type: "seven_day_sonnet", value: getUsageLimit(value.seven_day_sonnet) },
   ];
   const representative = candidates
-    .filter((candidate): candidate is { type: ClaudeRateLimitType; value: { utilization: number; resetsAt?: number } } =>
-      candidate.value !== null && candidate.value.utilization >= 1,
+    .filter((candidate): candidate is UsageLimitCandidate =>
+      candidate.value !== null && (candidate.value.utilization >= 1 || candidate.value.locked),
     )
     .sort((a, b) => b.value.utilization - a.value.utilization)[0];
+  // `extra_usage.disabled_reason` is set on every account that never enabled extra usage
+  // (`is_enabled: false`, `used_credits: 0`). It describes the *fallback* pool, so on its
+  // own it says nothing about whether the subscription limits are exhausted: only report a
+  // rejection when a primary limit is actually spent or locked.
+  if (!representative) return null;
+
   const extraUsage = isObject(value.extra_usage) ? value.extra_usage : null;
+  const extraUsageEnabled = extraUsage?.is_enabled === true;
   const disabledReason = extraUsage && typeof extraUsage.disabled_reason === "string" ? extraUsage.disabled_reason : undefined;
-  if (!representative && !disabledReason) return null;
 
   const result: Record<string, string> = {
     "anthropic-ratelimit-unified-status": "rejected",
+    "anthropic-ratelimit-unified-representative-claim": representative.type,
   };
-  if (representative) {
-    result["anthropic-ratelimit-unified-representative-claim"] = representative.type;
-    if (representative.value.resetsAt !== undefined) {
-      result["anthropic-ratelimit-unified-reset"] = String(representative.value.resetsAt);
-    }
+  if (representative.value.resetsAt !== undefined) {
+    result["anthropic-ratelimit-unified-reset"] = String(representative.value.resetsAt);
   }
-  if (disabledReason) {
+  if (!extraUsageEnabled && disabledReason) {
     result["anthropic-ratelimit-unified-overage-status"] = "rejected";
     result["anthropic-ratelimit-unified-overage-disabled-reason"] = disabledReason;
   }
@@ -1057,7 +1228,9 @@ function normalizeSystemBlocks(
   ctx: ExtensionContext,
   messages: unknown,
 ): { blocks: TextBlock[]; billingState: BillingHeaderState } {
-  const billingHeader = buildBillingHeader(messages);
+  // Claude Code only emits `cch` on first-party (and vertex) endpoints, so the model's own
+  // base URL decides, not just the ambient ANTHROPIC_BASE_URL.
+  const billingHeader = buildBillingHeader(messages, getEntrypoint(), isFirstPartyAnthropicBaseUrl(ctx.model?.baseUrl));
   let billingState: BillingHeaderState = "unknown";
   let sawBillingHeader = false;
   const nextBlocks: TextBlock[] = [];
@@ -1115,6 +1288,7 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
       }
 
       const outer = createAssistantMessageEventStream();
+      void refreshClaudeCodeVersion();
 
       void (async () => {
         try {
@@ -1131,21 +1305,39 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
             applyFooterStatusToCurrentContext(preflightFooterStatus);
           }
 
-          const inner = streamSimpleAnthropic(anthropicModel, context, options);
-          for await (const event of inner) {
-            log("custom_stream_event", { type: event.type, hasErrorMessage: event.type === "error" ? !!event.error.errorMessage : false });
-            if (event.type === "error" && isAnthropicRateLimitError(event.error.errorMessage)) {
-              log("custom_stream_rate_limit", { message: event.error.errorMessage });
-              const footerStatus = await resolveAnthropicQuotaFooterStatus(anthropicModel, options);
-              if (footerStatus) {
-                log("custom_stream_quota_resolved", { message: footerStatus.message, severity: footerStatus.severity });
-                applyFooterStatusToCurrentContext(footerStatus);
-                outer.push(createAnthropicErrorEvent(anthropicModel, footerStatus.message));
-                continue;
+          // Anthropic rejects the whole request when the advertised Claude Code version is
+          // older than the requested model requires. Adopt the demanded version and retry
+          // once instead of surfacing a dead end to the user.
+          let versionRetried = false;
+          let retryRequest = true;
+          while (retryRequest) {
+            retryRequest = false;
+            const inner = streamSimpleAnthropic(anthropicModel, context, withClaudeCodeHeaders(options));
+            for await (const event of inner) {
+              log("custom_stream_event", { type: event.type, hasErrorMessage: event.type === "error" ? !!event.error.errorMessage : false });
+              if (event.type === "error" && !versionRetried) {
+                const requiredVersion = extractRequiredClaudeCodeVersion(event.error.errorMessage);
+                if (requiredVersion && recordClaudeCodeVersion(requiredVersion, "model-gate")) {
+                  log("custom_stream_version_retry", { requiredVersion, message: event.error.errorMessage });
+                  versionRetried = true;
+                  retryRequest = true;
+                  break;
+                }
               }
-            }
 
-            outer.push(event);
+              if (event.type === "error" && isAnthropicRateLimitError(event.error.errorMessage)) {
+                log("custom_stream_rate_limit", { message: event.error.errorMessage });
+                const footerStatus = await resolveAnthropicQuotaFooterStatus(anthropicModel, options);
+                if (footerStatus) {
+                  log("custom_stream_quota_resolved", { message: footerStatus.message, severity: footerStatus.severity });
+                  applyFooterStatusToCurrentContext(footerStatus);
+                  outer.push(createAnthropicErrorEvent(anthropicModel, footerStatus.message));
+                  continue;
+                }
+              }
+
+              outer.push(event);
+            }
           }
           outer.end();
         } catch (error) {
@@ -1158,6 +1350,7 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", (_event, ctx) => {
+    void refreshClaudeCodeVersion();
     syncSetupStatus(ctx, ctx.getSystemPrompt());
   });
 
