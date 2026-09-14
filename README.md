@@ -69,7 +69,9 @@ No configuration is required for normal use.
 | `PI_CLAUDE_OAUTH_REINJECT_MODE` | `prepend-custom-message` | `prepend-custom-message`, `append-custom-message`, `user-reminder`, or `none` |
 | `PI_CLAUDE_OAUTH_DOCS_FILE` | unset | Fallback file containing Pi docs context |
 | `PI_CLAUDE_OAUTH_LOG_FILE` | unset | JSONL debug log path |
-| `PI_CLAUDE_CODE_VERSION` | bundled version | Claude Code version in request metadata |
+| `PI_CLAUDE_CODE_VERSION` | bundled version | Pin the Claude Code version in request metadata (disables version learning) |
+| `PI_CLAUDE_OAUTH_VERSION_CHECK` | `1` | Set to `0` to stop refreshing the advertised Claude Code version from the npm registry |
+| `PI_CLAUDE_OAUTH_CLIENT_HEADERS` | `1` | Set to `0` to stop sending `user-agent` / `x-app` / `x-claude-code-session-id` |
 | `PI_CLAUDE_CODE_ENTRYPOINT` | `pi` | Billing-header entrypoint |
 | `PI_CLAUDE_CODE_WORKLOAD` | unset | Optional workload metadata |
 | `PI_CLAUDE_CODE_SUBSCRIPTION_TYPE` | unset | Plan type used for limit labels |

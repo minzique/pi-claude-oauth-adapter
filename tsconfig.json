@@ -3,10 +3,16 @@
     "target": "ES2023",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "lib": ["ES2023"],
+    "lib": [
+      "ES2023"
+    ],
     "strict": true,
     "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true
   },
-  "include": ["extensions/**/*.ts"]
+  "include": [
+    "extensions/**/*.ts",
+    "test/**/*.ts"
+  ]
 }
