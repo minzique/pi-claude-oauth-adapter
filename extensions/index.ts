@@ -579,6 +579,10 @@ function getUsageLimit(value: unknown): { utilization: number; resetsAt?: number
   return { utilization: value.utilization / 100, resetsAt: parseUsageReset(value.resets_at) };
 }
 
+function getUsagePercent(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value / 100 : undefined;
+}
+
 function usageResponseToRateLimitHeaders(value: unknown): Record<string, string> | null {
   if (!isObject(value)) return null;
   const candidates: Array<{ type: ClaudeRateLimitType; value: { utilization: number; resetsAt?: number } | null }> = [
@@ -593,8 +597,18 @@ function usageResponseToRateLimitHeaders(value: unknown): Record<string, string>
     )
     .sort((a, b) => b.value.utilization - a.value.utilization)[0];
   const extraUsage = isObject(value.extra_usage) ? value.extra_usage : null;
-  const disabledReason = extraUsage && typeof extraUsage.disabled_reason === "string" ? extraUsage.disabled_reason : undefined;
-  if (!representative && !disabledReason) return null;
+  const spend = isObject(value.spend) ? value.spend : null;
+  const disabledReason = extraUsage && typeof extraUsage.disabled_reason === "string"
+    ? extraUsage.disabled_reason
+    : spend && typeof spend.disabled_reason === "string"
+      ? spend.disabled_reason
+      : undefined;
+  const extraUsageEnabled = extraUsage?.is_enabled === true || spend?.enabled === true;
+  const extraUsageUtilization = getUsagePercent(extraUsage?.utilization) ?? getUsagePercent(spend?.percent);
+  // The OAuth usage endpoint can report `extra_usage.disabled_reason: "out_of_credits"`
+  // while normal plan limits are still available. That only means paid overage
+  // credits are unavailable, not that the current request must be rejected.
+  if (!representative) return null;
 
   const result: Record<string, string> = {
     "anthropic-ratelimit-unified-status": "rejected",
@@ -605,7 +619,13 @@ function usageResponseToRateLimitHeaders(value: unknown): Record<string, string>
       result["anthropic-ratelimit-unified-reset"] = String(representative.value.resetsAt);
     }
   }
-  if (disabledReason) {
+  if (extraUsageEnabled && !disabledReason) {
+    result["anthropic-ratelimit-unified-overage-status"] = extraUsageUtilization !== undefined && extraUsageUtilization >= 0.9 ? "allowed_warning" : "allowed";
+    result["anthropic-ratelimit-unified-overage-in-use"] = "true";
+    if (extraUsageUtilization !== undefined) {
+      result["anthropic-ratelimit-unified-overage-utilization"] = String(extraUsageUtilization);
+    }
+  } else if (disabledReason) {
     result["anthropic-ratelimit-unified-overage-status"] = "rejected";
     result["anthropic-ratelimit-unified-overage-disabled-reason"] = disabledReason;
   }
