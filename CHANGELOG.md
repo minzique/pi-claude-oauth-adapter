@@ -2,6 +2,11 @@
 
 All notable changes to `pi-claude-oauth-adapter` live here.
 
+## Unreleased
+
+- Update the bundled Claude Code default version to `2.1.281`, the latest published release.
+- Report the live advertised version in the billing-header status message instead of a hardcoded `2.1.226`.
+
 ## 0.2.2 — 2026-09-14
 
 - Stop blocking every request with `You're out of usage credits`: `extra_usage.disabled_reason` is set on any account that never enabled extra usage, so it no longer creates a usage-exhausted state on its own. Exhaustion now requires a spent or locked primary limit.

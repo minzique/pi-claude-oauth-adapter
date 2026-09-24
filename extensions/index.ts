@@ -19,7 +19,7 @@ const ISSUE_STATUS_KEY = "claude-oauth-issue";
 const END_MARKERS = ["\n\n# Project Context", "\n\n<available_skills>", "\nCurrent date:"] as const;
 const PI_TOPIC_REGEX =
   /\b(pi|@mariozechner\/pi-|pi-mono|coding agent harness|pi sdk|pi extension|pi theme|pi skill|pi tui|pi package|prompt templates?|keybindings?|custom providers?|adding models?)\b/i;
-const DEFAULT_CLAUDE_CODE_VERSION = "2.1.270";
+const DEFAULT_CLAUDE_CODE_VERSION = "2.1.281";
 // Anthropic gates newer models on the advertised Claude Code version and answers with
 // HTTP 400 `invalid_request_error` when it is too old, e.g.
 // "Claude Code 2.1.226 does not support this model; version 2.1.251 or newer is required."
@@ -1429,7 +1429,7 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
       normalized.billingState === "injected"
         ? "Injected Claude billing header into Anthropic OAuth request"
         : normalized.billingState === "updated"
-          ? "Updated Claude billing header to Claude Code 2.1.226 shape"
+          ? `Updated Claude billing header to Claude Code ${getClaudeCodeVersion()} shape`
           : normalized.billingState === "present"
             ? "Anthropic OAuth request already includes Claude billing header"
             : "Normalized Anthropic OAuth request";
