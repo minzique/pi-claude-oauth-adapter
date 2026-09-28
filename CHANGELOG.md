@@ -2,6 +2,10 @@
 
 All notable changes to `pi-claude-oauth-adapter` live here.
 
+## Unreleased
+
+- Normalize the Claude billing header and identity block on the final provider payload inside the adapter's OAuth `streamSimple`: the caller's `onPayload` (including Pi's `before_provider_request` chain) runs first and its replacement is honored, then the adapter normalizes the result. Nested requests through the model registry (compaction, summaries, extension `complete` calls) now carry billing too, and billing always matches the messages actually sent regardless of extension load order. The body normalization no longer runs in the `before_provider_request` hook; API-key requests are unchanged.
+
 ## 0.2.2 — 2026-09-14
 
 - Stop blocking every request with `You're out of usage credits`: `extra_usage.disabled_reason` is set on any account that never enabled extra usage, so it no longer creates a usage-exhausted state on its own. Exhaustion now requires a spent or locked primary limit.
