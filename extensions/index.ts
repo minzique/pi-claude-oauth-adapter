@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writ
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import * as piAi from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, type Api, type AssistantMessageEvent, type Context, type Model, type ProviderHeaders, type SimpleStreamOptions } from "@earendil-works/pi-ai";
 // Pi's extension loader only aliases the pi-ai root, `/compat`, `/oauth` and
 // `/providers/all`. Deeper subpaths such as `/api/anthropic-messages` resolve against the
@@ -1206,12 +1207,11 @@ function cloneBlock(block: TextBlock): TextBlock {
   return block.cache_control ? { ...block, cache_control: { ...block.cache_control } } : { ...block };
 }
 
-function ensurePromptBlock(blocks: TextBlock[], ctx: ExtensionContext): TextBlock[] {
+function ensurePromptBlock(blocks: TextBlock[], systemPrompt: string): TextBlock[] {
   if (blocks.some((block) => !block.text.startsWith("x-anthropic-billing-header:"))) {
     return blocks;
   }
 
-  const systemPrompt = ctx.getSystemPrompt();
   const extracted = extractDocsSection(systemPrompt);
   const text = extracted?.strippedPrompt ?? systemPrompt;
   if (!text.trim()) return blocks;
@@ -1225,12 +1225,13 @@ function ensurePromptBlock(blocks: TextBlock[], ctx: ExtensionContext): TextBloc
 
 function normalizeSystemBlocks(
   blocks: TextBlock[],
-  ctx: ExtensionContext,
   messages: unknown,
+  baseUrl: string | undefined,
+  systemPrompt: string,
 ): { blocks: TextBlock[]; billingState: BillingHeaderState } {
   // Claude Code only emits `cch` on first-party (and vertex) endpoints, so the model's own
   // base URL decides, not just the ambient ANTHROPIC_BASE_URL.
-  const billingHeader = buildBillingHeader(messages, getEntrypoint(), isFirstPartyAnthropicBaseUrl(ctx.model?.baseUrl));
+  const billingHeader = buildBillingHeader(messages, getEntrypoint(), isFirstPartyAnthropicBaseUrl(baseUrl));
   let billingState: BillingHeaderState = "unknown";
   let sawBillingHeader = false;
   const nextBlocks: TextBlock[] = [];
@@ -1270,7 +1271,78 @@ function normalizeSystemBlocks(
     billingState = "injected";
   }
 
-  return { blocks: ensurePromptBlock(nextBlocks, ctx), billingState };
+  return { blocks: ensurePromptBlock(nextBlocks, systemPrompt), billingState };
+}
+
+function normalizeOAuthPayload(payload: unknown, baseUrl: string | undefined, systemPrompt: string): unknown {
+  if (!isPayloadLike(payload)) return payload;
+
+  const currentBlocks = Array.isArray(payload.system) ? payload.system.filter(isTextBlock) : [];
+  const normalized = normalizeSystemBlocks(currentBlocks, payload.messages, baseUrl, systemPrompt);
+  const changed =
+    normalized.billingState === "injected" ||
+    normalized.billingState === "updated" ||
+    normalized.blocks.length !== currentBlocks.length ||
+    normalized.blocks.some((block, index) => currentBlocks[index]?.text !== block.text);
+
+  const nextPayload = changed
+    ? { ...payload, system: normalized.blocks }
+    : payload;
+
+  const reason =
+    normalized.billingState === "injected"
+      ? "Injected Claude billing header into Anthropic OAuth request"
+      : normalized.billingState === "updated"
+        ? "Updated Claude billing header to Claude Code 2.1.226 shape"
+        : normalized.billingState === "present"
+          ? "Anthropic OAuth request already includes Claude billing header"
+          : "Normalized Anthropic OAuth request";
+
+  if (latestCtx && shouldApply(latestCtx)) {
+    setAdapterStatus(latestCtx, {
+      phase: "active",
+      applies: true,
+      suppressWarning: true,
+      docsSource: adapterStatus.docsSource === "missing" ? "fallback" : adapterStatus.docsSource,
+      billingHeader: normalized.billingState,
+      reason,
+      statusText: "✓ Claude OAuth active",
+    });
+  }
+
+  log("provider_payload", {
+    changed,
+    billingState: normalized.billingState,
+    docsSource: adapterStatus.docsSource,
+    suppressWarning: adapterStatus.suppressWarning,
+    systemBefore: currentBlocks.map((block, index) => `${index}: ${block.text.slice(0, 140)}`),
+    systemAfter: normalized.blocks.map((block, index) => `${index}: ${block.text.slice(0, 140)}`),
+    messageCount: Array.isArray(nextPayload.messages) ? nextPayload.messages.length : undefined,
+    toolCount: Array.isArray(nextPayload.tools) ? nextPayload.tools.length : undefined,
+  });
+
+  return nextPayload;
+}
+
+/**
+ * Billing and identity normalization must see the payload that is actually sent: host
+ * `before_provider_request` handlers and nested callers (compaction, summaries) may rewrite
+ * the messages. Run the caller's `onPayload` first, then normalize its result, so every
+ * OAuth request through this provider is normalized exactly once, whatever the caller.
+ */
+export function withFinalPayloadNormalization(options: SimpleStreamOptions | undefined, model: Model<"anthropic-messages">, context: Context): SimpleStreamOptions {
+  const callerOnPayload = options?.onPayload;
+  // Pi >= 0.87 passes a normalized transcript whose prompt lives in system messages;
+  // older Pi passes `context.systemPrompt` and has no transcript helpers.
+  const systemPrompt = context.systemPrompt
+    ?? ("getCurrentSystemPrompt" in piAi && typeof piAi.getCurrentSystemPrompt === "function" ? String(piAi.getCurrentSystemPrompt(context.messages)) : "");
+  return {
+    ...options,
+    onPayload: async (payload, payloadModel) => {
+      const replacement = await callerOnPayload?.(payload, payloadModel);
+      return normalizeOAuthPayload(replacement === undefined ? payload : replacement, model.baseUrl, systemPrompt);
+    },
+  };
 }
 
 export default function claudeOauthAdapter(pi: ExtensionAPI) {
@@ -1312,7 +1384,7 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
           let retryRequest = true;
           while (retryRequest) {
             retryRequest = false;
-            const inner = streamSimpleAnthropic(anthropicModel, context, withClaudeCodeHeaders(options));
+            const inner = streamSimpleAnthropic(anthropicModel, context, withClaudeCodeHeaders(withFinalPayloadNormalization(options, anthropicModel, context)));
             for await (const event of inner) {
               log("custom_stream_event", { type: event.type, hasErrorMessage: event.type === "error" ? !!event.error.errorMessage : false });
               if (event.type === "error" && !versionRetried) {
@@ -1407,55 +1479,6 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
       messagesAfter: summarizeMessages(nextMessages),
     });
     return { messages: nextMessages };
-  });
-
-  pi.on("before_provider_request", (event, ctx) => {
-    latestCtx = ctx;
-    if (!shouldApply(ctx) || !isPayloadLike(event.payload)) return;
-
-    const currentBlocks = Array.isArray(event.payload.system) ? event.payload.system.filter(isTextBlock) : [];
-    const normalized = normalizeSystemBlocks(currentBlocks, ctx, event.payload.messages);
-    const changed =
-      normalized.billingState === "injected" ||
-      normalized.billingState === "updated" ||
-      normalized.blocks.length !== currentBlocks.length ||
-      normalized.blocks.some((block, index) => currentBlocks[index]?.text !== block.text);
-
-    const nextPayload = changed
-      ? { ...event.payload, system: normalized.blocks }
-      : event.payload;
-
-    const reason =
-      normalized.billingState === "injected"
-        ? "Injected Claude billing header into Anthropic OAuth request"
-        : normalized.billingState === "updated"
-          ? "Updated Claude billing header to Claude Code 2.1.226 shape"
-          : normalized.billingState === "present"
-            ? "Anthropic OAuth request already includes Claude billing header"
-            : "Normalized Anthropic OAuth request";
-
-    setAdapterStatus(ctx, {
-      phase: "active",
-      applies: true,
-      suppressWarning: true,
-      docsSource: adapterStatus.docsSource === "missing" ? "fallback" : adapterStatus.docsSource,
-      billingHeader: normalized.billingState,
-      reason,
-      statusText: "✓ Claude OAuth active",
-    });
-
-    log("before_provider_request", {
-      changed,
-      billingState: normalized.billingState,
-      docsSource: adapterStatus.docsSource,
-      suppressWarning: adapterStatus.suppressWarning,
-      systemBefore: currentBlocks.map((block, index) => `${index}: ${block.text.slice(0, 140)}`),
-      systemAfter: normalized.blocks.map((block, index) => `${index}: ${block.text.slice(0, 140)}`),
-      messageCount: Array.isArray(nextPayload.messages) ? nextPayload.messages.length : undefined,
-      toolCount: Array.isArray(nextPayload.tools) ? nextPayload.tools.length : undefined,
-    });
-
-    return nextPayload;
   });
 
   pi.on("after_provider_response", (event, ctx) => {
