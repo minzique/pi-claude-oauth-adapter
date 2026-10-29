@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import * as piAi from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, type Api, type AssistantMessageEvent, type Context, type Model, type ProviderHeaders, type SimpleStreamOptions } from "@earendil-works/pi-ai";
 // Pi's extension loader only aliases the pi-ai root, `/compat`, `/oauth` and
 // `/providers/all`. Deeper subpaths such as `/api/anthropic-messages` resolve against the
@@ -18,7 +18,7 @@ const READY_STATUS_KEY = "claude-oauth-ready";
 const ISSUE_STATUS_KEY = "claude-oauth-issue";
 const END_MARKERS = ["\n\n# Project Context", "\n\n<available_skills>", "\nCurrent date:"] as const;
 const PI_TOPIC_REGEX =
-  /\b(pi|@mariozechner\/pi-|pi-mono|coding agent harness|pi sdk|pi extension|pi theme|pi skill|pi tui|pi package|prompt templates?|keybindings?|custom providers?|adding models?)\b/i;
+  /\b(pi(?!-clipboard\b)|@mariozechner\/pi-|pi-mono|coding agent harness|pi sdk|pi extension|pi theme|pi skill|pi tui|pi package|prompt templates?|keybindings?|custom providers?|adding models?)\b/i;
 const DEFAULT_CLAUDE_CODE_VERSION = "2.1.270";
 // Anthropic gates newer models on the advertised Claude Code version and answers with
 // HTTP 400 `invalid_request_error` when it is too old, e.g.
@@ -66,14 +66,6 @@ type ClaudeRateLimitType = "five_hour" | "seven_day" | "seven_day_opus" | "seven
 type ClaudeRateLimitStatus = "allowed" | "allowed_warning" | "rejected";
 type ClaudeOverageStatus = "allowed" | "allowed_warning" | "rejected";
 
-interface ActiveTurnState {
-  docsSection: string;
-  shouldInject: boolean;
-  mode: ReinjectionMode;
-  prompt: string;
-  timestamp: number;
-}
-
 interface AdapterStatusState {
   phase: AdapterPhase;
   applies: boolean;
@@ -113,28 +105,6 @@ interface ClaudeFooterStatus {
   severity: "warning" | "error";
 }
 
-interface TextContentPart {
-  type: "text";
-  text: string;
-}
-
-interface ImageContentPart {
-  type: "image";
-  source: unknown;
-}
-
-type MessageContentPart = TextContentPart | ImageContentPart;
-
-type CustomLikeMessage = {
-  role: "custom";
-  customType: string;
-  content: string | MessageContentPart[];
-  display: boolean;
-  timestamp: number;
-};
-
-type UserLikeMessage = Extract<AgentMessage, { role: "user" }>;
-
 type TextBlock = {
   type: "text";
   text: string;
@@ -153,7 +123,6 @@ interface ResolvedDocsSection {
   docsSource: DocsSource;
 }
 
-let activeTurn: ActiveTurnState | null = null;
 let latestCtx: ExtensionContext | null = null;
 let versionState: VersionState | null = null;
 let cachedQuotaFooterStatus: { keyHash: string; value: ClaudeFooterStatus | null; checkedAt: number } | null = null;
@@ -179,16 +148,12 @@ function isTextBlock(value: unknown): value is TextBlock {
   return isObject(value) && value.type === "text" && typeof value.text === "string";
 }
 
-function isUserMessage(message: AgentMessage): message is UserLikeMessage {
-  return message.role === "user";
-}
-
 function getEnvMode(): ReinjectionMode {
   const value = process.env.PI_CLAUDE_OAUTH_REINJECT_MODE;
   if (value === "none" || value === "prepend-custom-message" || value === "append-custom-message" || value === "user-reminder") {
     return value;
   }
-  return "prepend-custom-message";
+  return "append-custom-message";
 }
 
 function getEnvScope(): ReinjectionScope {
@@ -1100,118 +1065,15 @@ function wrapDocsContext(docsSection: string): string {
   return `<pi-docs-context>\n${docsSection}\n</pi-docs-context>`;
 }
 
-function summarizeMessages(messages: AgentMessage[]): Array<Record<string, unknown>> {
-  return messages.slice(-4).map((message) => {
-    if (message.role === "user" || message.role === "assistant" || message.role === "toolResult") {
-      const content = Array.isArray(message.content)
-        ? message.content
-            .filter((part): part is TextContentPart => isObject(part) && part.type === "text" && typeof part.text === "string")
-            .map((part) => part.text)
-            .join("\n")
-        : String(message.content);
-      return { role: message.role, text: content.slice(0, 140) };
-    }
-
-    if (message.role === "custom") {
-      const content = typeof message.content === "string"
-        ? message.content
-        : message.content
-            .filter((part): part is TextContentPart => part.type === "text")
-            .map((part) => part.text)
-            .join("\n");
-      return { role: message.role, customType: message.customType, text: content.slice(0, 140) };
-    }
-
-    return { role: message.role };
-  });
-}
-
-function prependCustomMessage(messages: AgentMessage[], docsSection: string, timestamp: number): AgentMessage[] {
-  const customMessage: CustomLikeMessage = {
-    role: "custom",
-    customType: CUSTOM_TYPE,
-    content: wrapDocsContext(docsSection),
-    display: false,
-    timestamp,
-  };
-
-  const latestUserIndex = [...messages].findLastIndex((message) => isUserMessage(message));
-  if (latestUserIndex < 0) return [...messages, customMessage as AgentMessage];
-
-  const nextMessages = [...messages];
-  nextMessages.splice(latestUserIndex, 0, customMessage as AgentMessage);
-  return nextMessages;
-}
-
-function appendCustomMessage(messages: AgentMessage[], docsSection: string, timestamp: number): AgentMessage[] {
-  const customMessage: CustomLikeMessage = {
-    role: "custom",
-    customType: CUSTOM_TYPE,
-    content: wrapDocsContext(docsSection),
-    display: false,
-    timestamp,
-  };
-
-  const latestUserIndex = [...messages].findLastIndex((message) => isUserMessage(message));
-  if (latestUserIndex < 0) return [...messages, customMessage as AgentMessage];
-
-  const nextMessages = [...messages];
-  nextMessages.splice(latestUserIndex + 1, 0, customMessage as AgentMessage);
-  return nextMessages;
-}
-
-function prependReminderToLatestUser(messages: AgentMessage[], docsSection: string): AgentMessage[] {
-  const latestUserIndex = [...messages].findLastIndex((message) => isUserMessage(message));
-  if (latestUserIndex < 0) return messages;
-
-  const reminder = `<system-reminder>\n${docsSection}\n</system-reminder>\n\n`;
-  const nextMessages = structuredClone(messages);
-  const latestUser = nextMessages[latestUserIndex];
-  if (!isUserMessage(latestUser)) return messages;
-
-  if (typeof latestUser.content === "string") {
-    if (!latestUser.content.startsWith("<system-reminder>")) {
-      latestUser.content = `${reminder}${latestUser.content}`;
-    }
-    return nextMessages;
-  }
-
-  const firstTextIndex = latestUser.content.findIndex((part) => part.type === "text");
-  if (firstTextIndex < 0) {
-    latestUser.content.unshift({ type: "text", text: reminder } as TextContentPart);
-    return nextMessages;
-  }
-
-  const firstText = latestUser.content[firstTextIndex];
-  if (firstText.type === "text" && !firstText.text.startsWith("<system-reminder>")) {
-    latestUser.content[firstTextIndex] = { ...firstText, text: `${reminder}${firstText.text}` };
-  }
-  return nextMessages;
-}
-
-function injectDocs(messages: AgentMessage[], state: ActiveTurnState): AgentMessage[] {
-  if (!state.shouldInject || state.mode === "none") return messages;
-
-  switch (state.mode) {
-    case "prepend-custom-message":
-      return prependCustomMessage(messages, state.docsSection, state.timestamp);
-    case "append-custom-message":
-      return appendCustomMessage(messages, state.docsSection, state.timestamp);
-    case "user-reminder":
-      return prependReminderToLatestUser(messages, state.docsSection);
-  }
-}
-
 function cloneBlock(block: TextBlock): TextBlock {
   return block.cache_control ? { ...block, cache_control: { ...block.cache_control } } : { ...block };
 }
 
-function ensurePromptBlock(blocks: TextBlock[], ctx: ExtensionContext): TextBlock[] {
+function ensurePromptBlock(blocks: TextBlock[], systemPrompt: string): TextBlock[] {
   if (blocks.some((block) => !block.text.startsWith("x-anthropic-billing-header:"))) {
     return blocks;
   }
 
-  const systemPrompt = ctx.getSystemPrompt();
   const extracted = extractDocsSection(systemPrompt);
   const text = extracted?.strippedPrompt ?? systemPrompt;
   if (!text.trim()) return blocks;
@@ -1225,12 +1087,13 @@ function ensurePromptBlock(blocks: TextBlock[], ctx: ExtensionContext): TextBloc
 
 function normalizeSystemBlocks(
   blocks: TextBlock[],
-  ctx: ExtensionContext,
   messages: unknown,
+  baseUrl: string | undefined,
+  systemPrompt: string,
 ): { blocks: TextBlock[]; billingState: BillingHeaderState } {
   // Claude Code only emits `cch` on first-party (and vertex) endpoints, so the model's own
   // base URL decides, not just the ambient ANTHROPIC_BASE_URL.
-  const billingHeader = buildBillingHeader(messages, getEntrypoint(), isFirstPartyAnthropicBaseUrl(ctx.model?.baseUrl));
+  const billingHeader = buildBillingHeader(messages, getEntrypoint(), isFirstPartyAnthropicBaseUrl(baseUrl));
   let billingState: BillingHeaderState = "unknown";
   let sawBillingHeader = false;
   const nextBlocks: TextBlock[] = [];
@@ -1270,7 +1133,78 @@ function normalizeSystemBlocks(
     billingState = "injected";
   }
 
-  return { blocks: ensurePromptBlock(nextBlocks, ctx), billingState };
+  return { blocks: ensurePromptBlock(nextBlocks, systemPrompt), billingState };
+}
+
+function normalizeOAuthPayload(payload: unknown, baseUrl: string | undefined, systemPrompt: string): unknown {
+  if (!isPayloadLike(payload)) return payload;
+
+  const currentBlocks = Array.isArray(payload.system) ? payload.system.filter(isTextBlock) : [];
+  const normalized = normalizeSystemBlocks(currentBlocks, payload.messages, baseUrl, systemPrompt);
+  const changed =
+    normalized.billingState === "injected" ||
+    normalized.billingState === "updated" ||
+    normalized.blocks.length !== currentBlocks.length ||
+    normalized.blocks.some((block, index) => currentBlocks[index]?.text !== block.text);
+
+  const nextPayload = changed
+    ? { ...payload, system: normalized.blocks }
+    : payload;
+
+  const reason =
+    normalized.billingState === "injected"
+      ? "Injected Claude billing header into Anthropic OAuth request"
+      : normalized.billingState === "updated"
+        ? "Updated Claude billing header to Claude Code 2.1.226 shape"
+        : normalized.billingState === "present"
+          ? "Anthropic OAuth request already includes Claude billing header"
+          : "Normalized Anthropic OAuth request";
+
+  if (latestCtx && shouldApply(latestCtx)) {
+    setAdapterStatus(latestCtx, {
+      phase: "active",
+      applies: true,
+      suppressWarning: true,
+      docsSource: adapterStatus.docsSource === "missing" ? "fallback" : adapterStatus.docsSource,
+      billingHeader: normalized.billingState,
+      reason,
+      statusText: "✓ Claude OAuth active",
+    });
+  }
+
+  log("provider_payload", {
+    changed,
+    billingState: normalized.billingState,
+    docsSource: adapterStatus.docsSource,
+    suppressWarning: adapterStatus.suppressWarning,
+    systemBefore: currentBlocks.map((block, index) => `${index}: ${block.text.slice(0, 140)}`),
+    systemAfter: normalized.blocks.map((block, index) => `${index}: ${block.text.slice(0, 140)}`),
+    messageCount: Array.isArray(nextPayload.messages) ? nextPayload.messages.length : undefined,
+    toolCount: Array.isArray(nextPayload.tools) ? nextPayload.tools.length : undefined,
+  });
+
+  return nextPayload;
+}
+
+/**
+ * Billing and identity normalization must see the payload that is actually sent: host
+ * `before_provider_request` handlers and nested callers (compaction, summaries) may rewrite
+ * the messages. Run the caller's `onPayload` first, then normalize its result, so every
+ * OAuth request through this provider is normalized exactly once, whatever the caller.
+ */
+export function withFinalPayloadNormalization(options: SimpleStreamOptions | undefined, model: Model<"anthropic-messages">, context: Context): SimpleStreamOptions {
+  const callerOnPayload = options?.onPayload;
+  // Pi >= 0.87 passes a normalized transcript whose prompt lives in system messages;
+  // older Pi passes `context.systemPrompt` and has no transcript helpers.
+  const systemPrompt = context.systemPrompt
+    ?? ("getCurrentSystemPrompt" in piAi && typeof piAi.getCurrentSystemPrompt === "function" ? String(piAi.getCurrentSystemPrompt(context.messages)) : "");
+  return {
+    ...options,
+    onPayload: async (payload, payloadModel) => {
+      const replacement = await callerOnPayload?.(payload, payloadModel);
+      return normalizeOAuthPayload(replacement === undefined ? payload : replacement, model.baseUrl, systemPrompt);
+    },
+  };
 }
 
 export default function claudeOauthAdapter(pi: ExtensionAPI) {
@@ -1312,7 +1246,7 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
           let retryRequest = true;
           while (retryRequest) {
             retryRequest = false;
-            const inner = streamSimpleAnthropic(anthropicModel, context, withClaudeCodeHeaders(options));
+            const inner = streamSimpleAnthropic(anthropicModel, context, withClaudeCodeHeaders(withFinalPayloadNormalization(options, anthropicModel, context)));
             for await (const event of inner) {
               log("custom_stream_event", { type: event.type, hasErrorMessage: event.type === "error" ? !!event.error.errorMessage : false });
               if (event.type === "error" && !versionRetried) {
@@ -1360,28 +1294,15 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
 
   pi.on("before_agent_start", (event, ctx) => {
     const resolved = syncSetupStatus(ctx, event.systemPrompt);
-    if (!shouldApply(ctx)) {
-      activeTurn = null;
-      return;
-    }
+    if (!shouldApply(ctx) || !resolved.docsSection) return;
 
-    if (!resolved.docsSection) {
-      activeTurn = null;
-      return;
-    }
-
-    activeTurn = {
-      docsSection: resolved.docsSection,
-      shouldInject: shouldInjectDocs(event.prompt),
-      mode: getEnvMode(),
-      prompt: event.prompt,
-      timestamp: Date.now(),
-    };
-
+    const prompt = "prompt" in event ? event.prompt : undefined;
+    const mode = getEnvMode();
+    const shouldInject = typeof prompt === "string" && mode !== "none" && shouldInjectDocs(prompt);
     log("before_agent_start", {
-      prompt: event.prompt,
-      shouldInject: activeTurn.shouldInject,
-      mode: activeTurn.mode,
+      prompt,
+      shouldInject,
+      mode,
       scope: getEnvScope(),
       docsLength: resolved.docsSection.length,
       docsSource: resolved.docsSource,
@@ -1389,73 +1310,15 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
       suppressWarning: adapterStatus.suppressWarning,
     });
 
-    if (resolved.extracted) {
-      return { systemPrompt: resolved.extracted.strippedPrompt };
-    }
-
-    return;
-  });
-
-  pi.on("context", (event, ctx) => {
-    latestCtx = ctx;
-    if (!shouldApply(ctx) || !activeTurn) return;
-    const nextMessages = injectDocs(event.messages, activeTurn);
-    log("context", {
-      mode: activeTurn.mode,
-      shouldInject: activeTurn.shouldInject,
-      messagesBefore: summarizeMessages(event.messages),
-      messagesAfter: summarizeMessages(nextMessages),
-    });
-    return { messages: nextMessages };
-  });
-
-  pi.on("before_provider_request", (event, ctx) => {
-    latestCtx = ctx;
-    if (!shouldApply(ctx) || !isPayloadLike(event.payload)) return;
-
-    const currentBlocks = Array.isArray(event.payload.system) ? event.payload.system.filter(isTextBlock) : [];
-    const normalized = normalizeSystemBlocks(currentBlocks, ctx, event.payload.messages);
-    const changed =
-      normalized.billingState === "injected" ||
-      normalized.billingState === "updated" ||
-      normalized.blocks.length !== currentBlocks.length ||
-      normalized.blocks.some((block, index) => currentBlocks[index]?.text !== block.text);
-
-    const nextPayload = changed
-      ? { ...event.payload, system: normalized.blocks }
-      : event.payload;
-
-    const reason =
-      normalized.billingState === "injected"
-        ? "Injected Claude billing header into Anthropic OAuth request"
-        : normalized.billingState === "updated"
-          ? "Updated Claude billing header to Claude Code 2.1.226 shape"
-          : normalized.billingState === "present"
-            ? "Anthropic OAuth request already includes Claude billing header"
-            : "Normalized Anthropic OAuth request";
-
-    setAdapterStatus(ctx, {
-      phase: "active",
-      applies: true,
-      suppressWarning: true,
-      docsSource: adapterStatus.docsSource === "missing" ? "fallback" : adapterStatus.docsSource,
-      billingHeader: normalized.billingState,
-      reason,
-      statusText: "✓ Claude OAuth active",
-    });
-
-    log("before_provider_request", {
-      changed,
-      billingState: normalized.billingState,
-      docsSource: adapterStatus.docsSource,
-      suppressWarning: adapterStatus.suppressWarning,
-      systemBefore: currentBlocks.map((block, index) => `${index}: ${block.text.slice(0, 140)}`),
-      systemAfter: normalized.blocks.map((block, index) => `${index}: ${block.text.slice(0, 140)}`),
-      messageCount: Array.isArray(nextPayload.messages) ? nextPayload.messages.length : undefined,
-      toolCount: Array.isArray(nextPayload.tools) ? nextPayload.tools.length : undefined,
-    });
-
-    return nextPayload;
+    // Pi persists this message; request-local insertion would rewrite cached history next turn.
+    return {
+      ...(resolved.extracted ? { systemPrompt: resolved.extracted.strippedPrompt } : {}),
+      ...(shouldInject ? { message: {
+        customType: CUSTOM_TYPE,
+        content: wrapDocsContext(resolved.docsSection),
+        display: false,
+      } } : {}),
+    };
   });
 
   pi.on("after_provider_response", (event, ctx) => {
@@ -1507,13 +1370,8 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
     }
   });
 
-  pi.on("agent_end", () => {
-    activeTurn = null;
-  });
-
   pi.on("session_shutdown", (_event, ctx) => {
     latestCtx = null;
-    activeTurn = null;
     adapterStatus = {
       phase: "inactive",
       applies: false,

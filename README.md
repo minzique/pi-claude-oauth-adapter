@@ -42,7 +42,7 @@ flowchart LR
 For Anthropic OAuth requests, the adapter:
 
 - removes Pi's docs block and any conflicting Claude Code identity block from the system prompt
-- reinjects Pi docs as hidden context when the user asks about Pi
+- appends Pi docs as a hidden, persisted session message when the user asks about Pi; later requests keep that history unchanged
 - adds or updates the Claude billing header
 - turns generic `429` responses into Claude-style limit and reset messages
 
@@ -66,7 +66,7 @@ No configuration is required for normal use.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PI_CLAUDE_OAUTH_REINJECT_SCOPE` | `pi-only` | `pi-only`, `always`, or `never` |
-| `PI_CLAUDE_OAUTH_REINJECT_MODE` | `prepend-custom-message` | `prepend-custom-message`, `append-custom-message`, `user-reminder`, or `none` |
+| `PI_CLAUDE_OAUTH_REINJECT_MODE` | `append-custom-message` | `append-custom-message` or `none`; legacy `prepend-custom-message` and `user-reminder` values are aliases for the cache-safe append behavior |
 | `PI_CLAUDE_OAUTH_DOCS_FILE` | unset | Fallback file containing Pi docs context |
 | `PI_CLAUDE_OAUTH_LOG_FILE` | unset | JSONL debug log path |
 | `PI_CLAUDE_CODE_VERSION` | bundled version | Pin the Claude Code version in request metadata (disables version learning) |
@@ -81,6 +81,8 @@ Example:
 ```bash
 PI_CLAUDE_OAUTH_REINJECT_SCOPE=always pi
 ```
+
+Docs messages follow Pi's session history through reloads and branch navigation. Disabling injection stops new docs messages; it does not remove earlier ones. Clipboard filenames such as `pi-clipboard-….png` do not count as Pi questions.
 
 Debug logs may contain prompt excerpts and request metadata. Review and redact them before sharing.
 

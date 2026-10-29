@@ -5,6 +5,7 @@ import {
   extractRequiredClaudeCodeVersion,
   getClaudeFooterStatus,
   usageResponseToRateLimitHeaders,
+  withFinalPayloadNormalization,
 } from "../extensions/index.ts";
 
 /** Shape of `GET /api/oauth/usage` for a healthy account that never bought extra usage. */
@@ -123,5 +124,49 @@ describe("buildBillingHeader", () => {
 
   it("omits cch for non first-party endpoints", () => {
     expect(buildBillingHeader([{ role: "user", content: "hi" }], "pi", false)).not.toContain("cch=");
+  });
+});
+
+describe("withFinalPayloadNormalization", () => {
+  const model = { baseUrl: "https://api.anthropic.com" } as Parameters<typeof withFinalPayloadNormalization>[1];
+  const context = { systemPrompt: "You are Pi.", messages: [] } as unknown as Parameters<typeof withFinalPayloadNormalization>[2];
+  const system = (payload: unknown) => (payload as { system: { text: string }[] }).system.map((block) => block.text);
+
+  it("normalizes the payload a caller without onPayload sends", async () => {
+    const wrapped = withFinalPayloadNormalization(undefined, model, context);
+    const payload = { system: [{ type: "text", text: "You are Pi." }], messages: [{ role: "user", content: "hi" }] };
+    const sent = await wrapped.onPayload!(payload, model);
+    expect(system(sent)[0]).toBe(buildBillingHeader(payload.messages, "pi", true));
+    expect(system(sent).slice(1)).toEqual(["You are Pi."]);
+  });
+
+  it("runs the caller's onPayload first and normalizes what it returns", async () => {
+    const seen: unknown[] = [];
+    const wrapped = withFinalPayloadNormalization(
+      {
+        onPayload: (payload) => {
+          seen.push(payload);
+          // A nested caller (compaction, summaries) rewrites the transcript after the host hooks ran.
+          return { ...(payload as object), messages: [{ role: "user", content: "rewritten" }] };
+        },
+      },
+      model,
+      context,
+    );
+    const payload = { system: [{ type: "text", text: "You are Pi." }], messages: [{ role: "user", content: "hi" }] };
+    const sent = (await wrapped.onPayload!(payload, model)) as { messages: unknown };
+    expect(seen).toEqual([payload]);
+    expect(sent.messages).toEqual([{ role: "user", content: "rewritten" }]);
+    // The billing header samples the message that is actually sent, not the pre-rewrite one.
+    expect(system(sent)[0]).toBe(buildBillingHeader(sent.messages, "pi", true));
+    expect(system(sent)[0]).not.toBe(buildBillingHeader(payload.messages, "pi", true));
+  });
+
+  it("keeps the original payload when the caller's onPayload returns undefined", async () => {
+    const wrapped = withFinalPayloadNormalization({ onPayload: () => undefined }, model, context);
+    const payload = { system: [{ type: "text", text: "You are Pi." }], messages: [{ role: "user", content: "hi" }] };
+    const sent = (await wrapped.onPayload!(payload, model)) as { messages: unknown };
+    expect(sent.messages).toBe(payload.messages);
+    expect(system(sent)[0]).toBe(buildBillingHeader(payload.messages, "pi", true));
   });
 });
