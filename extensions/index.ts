@@ -1331,11 +1331,16 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
                 if (footerStatus) {
                   log("custom_stream_quota_resolved", { message: footerStatus.message, severity: footerStatus.severity });
                   applyFooterStatusToCurrentContext(footerStatus);
-                  outer.push(createAnthropicErrorEvent(anthropicModel, footerStatus.message));
+                  if (footerStatus.severity === "error") {
+                    outer.push(createAnthropicErrorEvent(anthropicModel, footerStatus.message));
+                  } else {
+                    // Preserve the original API error when quota status is a warning.
+                    outer.push(event);
+                  }
                   continue;
                 }
               }
-
+              
               outer.push(event);
             }
           }
