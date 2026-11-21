@@ -1324,18 +1324,18 @@ export default function claudeOauthAdapter(pi: ExtensionAPI) {
                   break;
                 }
               }
-
-              if (event.type === "error" && isAnthropicRateLimitError(event.error.errorMessage)) {
-                log("custom_stream_rate_limit", { message: event.error.errorMessage });
-                const footerStatus = await resolveAnthropicQuotaFooterStatus(anthropicModel, options);
-                if (footerStatus) {
-                  log("custom_stream_quota_resolved", { message: footerStatus.message, severity: footerStatus.severity });
-                  applyFooterStatusToCurrentContext(footerStatus);
+              
+              if (footerStatus) {
+                applyFooterStatusToCurrentContext(footerStatus);
+                if (footerStatus.severity === "error") {
                   outer.push(createAnthropicErrorEvent(anthropicModel, footerStatus.message));
-                  continue;
+                } else {
+                  // Preserve the original API error when quota status is a warning.
+                  outer.push(event);
                 }
+                continue;
               }
-
+              
               outer.push(event);
             }
           }
